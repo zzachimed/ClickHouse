@@ -1,6 +1,6 @@
 #pragma once
 
-#include <ext/shared_ptr_helper.h>
+#include <common/shared_ptr_helper.h>
 
 #include <Parsers/IAST_fwd.h>
 #include <Parsers/ASTSelectWithUnionQuery.h>
@@ -17,9 +17,9 @@ using Time = std::chrono::time_point<std::chrono::system_clock>;
 using Seconds = std::chrono::seconds;
 using MilliSeconds = std::chrono::milliseconds;
 
-class StorageMaterializedView final : public ext::shared_ptr_helper<StorageMaterializedView>, public IStorage, WithMutableContext
+class StorageMaterializedView final : public shared_ptr_helper<StorageMaterializedView>, public IStorage, WithMutableContext
 {
-    friend struct ext::shared_ptr_helper<StorageMaterializedView>;
+    friend struct shared_ptr_helper<StorageMaterializedView>;
 public:
     void startup() override;
     void shutdown() override;
@@ -42,10 +42,10 @@ public:
         return target_table->mayBenefitFromIndexForIn(left_in_operand, query_context, metadata_snapshot);
     }
 
-    BlockOutputStreamPtr write(const ASTPtr & query, const StorageMetadataPtr & /*metadata_snapshot*/, ContextPtr context) override;
+    SinkToStoragePtr write(const ASTPtr & query, const StorageMetadataPtr & /*metadata_snapshot*/, ContextPtr context) override;
 
     void drop() override;
-    void dropInnerTable(bool no_delay, ContextPtr context);
+    void dropInnerTableIfAny(bool no_delay, ContextPtr local_context) override;
 
     void truncate(const ASTPtr &, const StorageMetadataPtr &, ContextPtr, TableExclusiveLockHolder &) override;
 

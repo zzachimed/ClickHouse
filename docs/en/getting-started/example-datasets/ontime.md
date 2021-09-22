@@ -32,7 +32,7 @@ CREATE TABLE `ontime`
     `Reporting_Airline`               String,
     `DOT_ID_Reporting_Airline`        Int32,
     `IATA_CODE_Reporting_Airline`     String,
-    `Tail_Number`                     Int32,
+    `Tail_Number`                     String,
     `Flight_Number_Reporting_Airline` String,
     `OriginAirportID`                 Int32,
     `OriginAirportSeqID`              Int32,
@@ -404,4 +404,4 @@ This performance test was created by Vadim Tkachenko. See:
 -   https://www.percona.com/blog/2016/01/07/apache-spark-with-air-ontime-performance-data/
 -   http://nickmakos.blogspot.ru/2012/08/analyzing-air-traffic-performance-with.html
 
-[Original article](https://clickhouse.tech/docs/en/getting_started/example_datasets/ontime/) <!--hide-->
+[Original article](https://clickhouse.com/docs/en/getting_started/example_datasets/ontime/) <!--hide-->

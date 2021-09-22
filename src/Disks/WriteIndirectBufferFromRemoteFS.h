@@ -1,7 +1,8 @@
 #pragma once
-#include <Common/config.h>
 
-#if USE_AWS_S3 || USE_HDFS
+#if !defined(ARCADIA_BUILD)
+#include <Common/config.h>
+#endif
 
 #include <Disks/IDiskRemote.h>
 #include <IO/WriteBufferFromFile.h>
@@ -35,5 +36,3 @@ private:
 };
 
 }
-
-#endif

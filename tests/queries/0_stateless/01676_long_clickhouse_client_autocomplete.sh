@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Tags: long, no-fasttest
 
 CURDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../shell_config.sh
@@ -90,15 +91,6 @@ compwords_positive=(
 )
 for w in "${compwords_positive[@]}"; do
     test_completion_word "$w" || echo "[FAIL] $w (positive)"
-done
-
-# One negative is enough
-compwords_negative=(
-    # system.clusters
-    test_shard_localhost_no_such_cluster
-)
-for w in "${compwords_negative[@]}"; do
-    test_completion_word "$w" && echo "[FAIL] $w (negative)"
 done
 
 exit 0

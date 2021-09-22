@@ -34,6 +34,7 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
     extern const int NOT_IMPLEMENTED;
     extern const int UNKNOWN_STORAGE;
+    extern const int TABLE_IS_READ_ONLY;
 }
 
 
@@ -41,11 +42,22 @@ InterpreterAlterQuery::InterpreterAlterQuery(const ASTPtr & query_ptr_, ContextP
 {
 }
 
+
 BlockIO InterpreterAlterQuery::execute()
 {
-    BlockIO res;
     const auto & alter = query_ptr->as<ASTAlterQuery &>();
+    if (alter.alter_object == ASTAlterQuery::AlterObjectType::DATABASE)
+        return executeToDatabase(alter);
+    else if (alter.alter_object == ASTAlterQuery::AlterObjectType::TABLE
+            || alter.alter_object == ASTAlterQuery::AlterObjectType::LIVE_VIEW)
+        return executeToTable(alter);
+    throw Exception(ErrorCodes::LOGICAL_ERROR, "Unknown alter object type");
+}
 
+
+BlockIO InterpreterAlterQuery::executeToTable(const ASTAlterQuery & alter)
+{
+    BlockIO res;
 
     if (!alter.cluster.empty())
         return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess());
@@ -56,7 +68,7 @@ BlockIO InterpreterAlterQuery::execute()
 
     DatabasePtr database = DatabaseCatalog::instance().getDatabase(table_id.database_name);
     if (typeid_cast<DatabaseReplicated *>(database.get())
-        && getContext()->getClientInfo().query_kind != ClientInfo::QueryKind::SECONDARY_QUERY)
+        && !getContext()->getClientInfo().is_replicated_database_internal)
     {
         auto guard = DatabaseCatalog::instance().getDDLGuard(table_id.database_name, table_id.table_name);
         guard->releaseTableLock();
@@ -64,11 +76,12 @@ BlockIO InterpreterAlterQuery::execute()
     }
 
     StoragePtr table = DatabaseCatalog::instance().getTable(table_id, getContext());
+    if (table->isStaticStorage())
+        throw Exception(ErrorCodes::TABLE_IS_READ_ONLY, "Table is read-only");
     auto alter_lock = table->lockForAlter(getContext()->getCurrentQueryId(), getContext()->getSettingsRef().lock_acquire_timeout);
     auto metadata_snapshot = table->getInMemoryMetadataPtr();
 
-    /// Add default database to table identifiers that we can encounter in e.g. default expressions,
-    /// mutation expression, etc.
+    /// Add default database to table identifiers that we can encounter in e.g. default expressions, mutation expression, etc.
     AddDefaultDatabaseVisitor visitor(table_id.getDatabaseName());
     ASTPtr command_list_ptr = alter.command_list->ptr();
     visitor.visit(command_list_ptr);
@@ -81,7 +94,9 @@ BlockIO InterpreterAlterQuery::execute()
     {
         auto * command_ast = child->as<ASTAlterCommand>();
         if (auto alter_command = AlterCommand::parse(command_ast))
+        {
             alter_commands.emplace_back(std::move(*alter_command));
+        }
         else if (auto partition_command = PartitionCommand::parse(command_ast))
         {
             partition_commands.emplace_back(std::move(*partition_command));
@@ -95,7 +110,9 @@ BlockIO InterpreterAlterQuery::execute()
             mutation_commands.emplace_back(std::move(*mut_command));
         }
         else if (auto view_command = ViewCommand::parse(command_ast))
+        {
             view_commands.emplace_back(std::move(*view_command));
+        }
         else
             throw Exception("Wrong parameter type in ALTER query", ErrorCodes::LOGICAL_ERROR);
     }
@@ -103,7 +120,8 @@ BlockIO InterpreterAlterQuery::execute()
     if (typeid_cast<DatabaseReplicated *>(database.get()))
     {
         int command_types_count = !mutation_commands.empty() + !partition_commands.empty() + !view_commands.empty() + !alter_commands.empty();
-        if (1 < command_types_count)
+        bool mixed_settings_amd_metadata_alter = alter_commands.hasSettingsAlterCommand() && !alter_commands.isSettingsAlter();
+        if (1 < command_types_count || mixed_settings_amd_metadata_alter)
             throw Exception(ErrorCodes::NOT_IMPLEMENTED, "For Replicated databases it's not allowed "
                                                          "to execute ALTERs of different types in single query");
     }
@@ -159,6 +177,45 @@ BlockIO InterpreterAlterQuery::execute()
 }
 
 
+BlockIO InterpreterAlterQuery::executeToDatabase(const ASTAlterQuery & alter)
+{
+    BlockIO res;
+    getContext()->checkAccess(getRequiredAccess());
+    DatabasePtr database = DatabaseCatalog::instance().getDatabase(alter.database);
+    AlterCommands alter_commands;
+
+    for (const auto & child : alter.command_list->children)
+    {
+        auto * command_ast = child->as<ASTAlterCommand>();
+        if (auto alter_command = AlterCommand::parse(command_ast))
+            alter_commands.emplace_back(std::move(*alter_command));
+        else
+            throw Exception("Wrong parameter type in ALTER DATABASE query", ErrorCodes::LOGICAL_ERROR);
+    }
+
+    if (!alter_commands.empty())
+    {
+        /// Only ALTER SETTING is supported.
+        for (const auto & command : alter_commands)
+        {
+            if (command.type != AlterCommand::MODIFY_DATABASE_SETTING)
+                throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Unsupported alter type for database engines");
+        }
+
+        for (const auto & command : alter_commands)
+        {
+            if (!command.ignore)
+            {
+                if (command.type == AlterCommand::MODIFY_DATABASE_SETTING)
+                    database->applySettingsChanges(command.settings_changes, getContext());
+                else
+                    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Unsupported alter command");
+            }
+        }
+    }
+
+    return res;
+}
 AccessRightsElements InterpreterAlterQuery::getRequiredAccess() const
 {
     AccessRightsElements required_access;
@@ -211,6 +268,11 @@ AccessRightsElements InterpreterAlterQuery::getRequiredAccessForCommand(const AS
         case ASTAlterCommand::COMMENT_COLUMN:
         {
             required_access.emplace_back(AccessType::ALTER_COMMENT_COLUMN, database, table, column_name());
+            break;
+        }
+        case ASTAlterCommand::MATERIALIZE_COLUMN:
+        {
+            required_access.emplace_back(AccessType::ALTER_MATERIALIZE_COLUMN, database, table);
             break;
         }
         case ASTAlterCommand::MODIFY_ORDER_BY:
@@ -280,6 +342,7 @@ AccessRightsElements InterpreterAlterQuery::getRequiredAccessForCommand(const AS
             required_access.emplace_back(AccessType::ALTER_MATERIALIZE_TTL, database, table);
             break;
         }
+        case ASTAlterCommand::RESET_SETTING: [[fallthrough]];
         case ASTAlterCommand::MODIFY_SETTING:
         {
             required_access.emplace_back(AccessType::ALTER_SETTINGS, database, table);
@@ -299,15 +362,22 @@ AccessRightsElements InterpreterAlterQuery::getRequiredAccessForCommand(const AS
         }
         case ASTAlterCommand::MOVE_PARTITION:
         {
-            if ((command.move_destination_type == DataDestinationType::DISK)
-                || (command.move_destination_type == DataDestinationType::VOLUME))
+            switch (command.move_destination_type)
             {
-                required_access.emplace_back(AccessType::ALTER_MOVE_PARTITION, database, table);
-            }
-            else if (command.move_destination_type == DataDestinationType::TABLE)
-            {
-                required_access.emplace_back(AccessType::SELECT | AccessType::ALTER_DELETE, database, table);
-                required_access.emplace_back(AccessType::INSERT, command.to_database, command.to_table);
+                case DataDestinationType::DISK: [[fallthrough]];
+                case DataDestinationType::VOLUME:
+                    required_access.emplace_back(AccessType::ALTER_MOVE_PARTITION, database, table);
+                    break;
+                case DataDestinationType::TABLE:
+                    required_access.emplace_back(AccessType::SELECT | AccessType::ALTER_DELETE, database, table);
+                    required_access.emplace_back(AccessType::INSERT, command.to_database, command.to_table);
+                    break;
+                case DataDestinationType::SHARD:
+                    required_access.emplace_back(AccessType::SELECT | AccessType::ALTER_DELETE, database, table);
+                    required_access.emplace_back(AccessType::MOVE_PARTITION_BETWEEN_SHARDS);
+                    break;
+                case DataDestinationType::DELETE:
+                    throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected destination type for command.");
             }
             break;
         }
@@ -345,6 +415,11 @@ AccessRightsElements InterpreterAlterQuery::getRequiredAccessForCommand(const AS
             required_access.emplace_back(AccessType::ALTER_RENAME_COLUMN, database, table, column_name());
             break;
         }
+        case ASTAlterCommand::MODIFY_DATABASE_SETTING:
+        {
+            required_access.emplace_back(AccessType::ALTER_DATABASE_SETTINGS, database, table);
+            break;
+        }
         case ASTAlterCommand::NO_TYPE: break;
     }
 
@@ -356,7 +431,7 @@ void InterpreterAlterQuery::extendQueryLogElemImpl(QueryLogElement & elem, const
     const auto & alter = ast->as<const ASTAlterQuery &>();
 
     elem.query_kind = "Alter";
-    if (alter.command_list != nullptr)
+    if (alter.command_list != nullptr && alter.alter_object != ASTAlterQuery::AlterObjectType::DATABASE)
     {
         // Alter queries already have their target table inserted into `elem`.
         if (elem.query_tables.size() != 1)

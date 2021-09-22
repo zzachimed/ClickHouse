@@ -4,11 +4,11 @@
 #include <DataStreams/AddingDefaultBlockOutputStream.h>
 #include <DataStreams/CheckConstraintsBlockOutputStream.h>
 #include <DataStreams/CountingBlockOutputStream.h>
-#include <DataStreams/InputStreamFromASTInsertQuery.h>
-#include <DataStreams/NullAndDoCopyBlockInputStream.h>
+#include <Processors/Transforms/getSourceFromASTInsertQuery.h>
 #include <DataStreams/PushingToViewsBlockOutputStream.h>
 #include <DataStreams/SquashingBlockOutputStream.h>
 #include <DataStreams/copyData.h>
+#include <DataStreams/PushingToSinkBlockOutputStream.h>
 #include <IO/ConnectionTimeoutsContext.h>
 #include <Interpreters/InterpreterSelectWithUnionQuery.h>
 #include <Interpreters/InterpreterWatchQuery.h>
@@ -37,6 +37,7 @@ namespace DB
 
 namespace ErrorCodes
 {
+    extern const int NOT_IMPLEMENTED;
     extern const int NO_SUCH_COLUMN_IN_TABLE;
     extern const int ILLEGAL_COLUMN;
     extern const int DUPLICATE_COLUMN;
@@ -52,7 +53,6 @@ InterpreterInsertQuery::InterpreterInsertQuery(
 {
     checkStackSize();
 }
-
 
 StoragePtr InterpreterInsertQuery::getTable(ASTInsertQuery & query)
 {
@@ -147,23 +147,19 @@ static bool isTrivialSelect(const ASTPtr & select)
 };
 
 
-BlockIO InterpreterInsertQuery::execute()
+std::pair<BlockIO, BlockOutputStreams> InterpreterInsertQuery::executeImpl(
+    const StoragePtr & table, const StorageMetadataPtr & metadata_snapshot, Block & sample_block)
 {
-    const Settings & settings = getContext()->getSettingsRef();
-    auto & query = query_ptr->as<ASTInsertQuery &>();
+    const auto & settings = getContext()->getSettingsRef();
+    const auto & query = query_ptr->as<const ASTInsertQuery &>();
+
+    if (query.partition_by && !table->supportsPartitionBy())
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "PARTITION BY clause is not supported by storage");
 
     BlockIO res;
-
-    StoragePtr table = getTable(query);
-    auto table_lock = table->lockForShare(getContext()->getInitialQueryId(), settings.lock_acquire_timeout);
-    auto metadata_snapshot = table->getInMemoryMetadataPtr();
-
-    auto query_sample_block = getSampleBlock(query, table, metadata_snapshot);
-    if (!query.table_function)
-        getContext()->checkAccess(AccessType::INSERT, query.table_id, query_sample_block.getNames());
+    BlockOutputStreams out_streams;
 
     bool is_distributed_insert_select = false;
-
     if (query.select && table->isRemote() && settings.parallel_distributed_insert_select)
     {
         // Distributed INSERT SELECT
@@ -174,7 +170,6 @@ BlockIO InterpreterInsertQuery::execute()
         }
     }
 
-    BlockOutputStreams out_streams;
     if (!is_distributed_insert_select || query.watch)
     {
         size_t out_streams_size = 1;
@@ -189,12 +184,11 @@ BlockIO InterpreterInsertQuery::execute()
                 const auto & union_modes = select_query.list_of_modes;
 
                 /// ASTSelectWithUnionQuery is not normalized now, so it may pass some queries which can be Trivial select queries
-                is_trivial_insert_select
-                    = std::all_of(
-                          union_modes.begin(),
-                          union_modes.end(),
-                          [](const ASTSelectWithUnionQuery::Mode & mode) { return mode == ASTSelectWithUnionQuery::Mode::ALL; })
-                    && std::all_of(selects.begin(), selects.end(), [](const ASTPtr & select) { return isTrivialSelect(select); });
+                const auto mode_is_all = [](const auto & mode) { return mode == ASTSelectWithUnionQuery::Mode::ALL; };
+
+                is_trivial_insert_select =
+                    std::all_of(union_modes.begin(), union_modes.end(), std::move(mode_is_all))
+                    && std::all_of(selects.begin(), selects.end(), isTrivialSelect);
             }
 
             if (is_trivial_insert_select)
@@ -243,7 +237,7 @@ BlockIO InterpreterInsertQuery::execute()
             if (getContext()->getSettingsRef().insert_null_as_default)
             {
                 const auto & input_columns = res.pipeline.getHeader().getColumnsWithTypeAndName();
-                const auto & query_columns = query_sample_block.getColumnsWithTypeAndName();
+                const auto & query_columns = sample_block.getColumnsWithTypeAndName();
                 const auto & output_columns = metadata_snapshot->getColumns();
 
                 if (input_columns.size() == query_columns.size())
@@ -253,7 +247,7 @@ BlockIO InterpreterInsertQuery::execute()
                         /// Change query sample block columns to Nullable to allow inserting nullable columns, where NULL values will be substituted with
                         /// default column values (in AddingDefaultBlockOutputStream), so all values will be cast correctly.
                         if (input_columns[col_idx].type->isNullable() && !query_columns[col_idx].type->isNullable() && output_columns.hasDefault(query_columns[col_idx].name))
-                            query_sample_block.setColumn(col_idx, ColumnWithTypeAndName(makeNullable(query_columns[col_idx].column), makeNullable(query_columns[col_idx].type), query_columns[col_idx].name));
+                            sample_block.setColumn(col_idx, ColumnWithTypeAndName(makeNullable(query_columns[col_idx].column), makeNullable(query_columns[col_idx].type), query_columns[col_idx].name));
                     }
                 }
             }
@@ -262,7 +256,6 @@ BlockIO InterpreterInsertQuery::execute()
         {
             InterpreterWatchQuery interpreter_watch{ query.watch, getContext() };
             res = interpreter_watch.execute();
-            res.pipeline.init(Pipe(std::make_shared<SourceFromInputStream>(std::move(res.in))));
         }
 
         for (size_t i = 0; i < out_streams_size; i++)
@@ -273,7 +266,7 @@ BlockIO InterpreterInsertQuery::execute()
             /// NOTE: we explicitly ignore bound materialized views when inserting into Kafka Storage.
             ///       Otherwise we'll get duplicates when MV reads same rows again from Kafka.
             if (table->noPushingToViews() && !no_destination)
-                out = table->write(query_ptr, metadata_snapshot, getContext());
+                out = std::make_shared<PushingToSinkBlockOutputStream>(table->write(query_ptr, metadata_snapshot, getContext()));
             else
                 out = std::make_shared<PushingToViewsBlockOutputStream>(table, metadata_snapshot, getContext(), query_ptr, no_destination);
 
@@ -289,7 +282,7 @@ BlockIO InterpreterInsertQuery::execute()
             /// Actually we don't know structure of input blocks from query/table,
             /// because some clients break insertion protocol (columns != header)
             out = std::make_shared<AddingDefaultBlockOutputStream>(
-                out, query_sample_block, metadata_snapshot->getColumns(), getContext(), null_as_default);
+                out, sample_block, metadata_snapshot->getColumns(), getContext(), null_as_default);
 
             /// It's important to squash blocks as early as possible (before other transforms),
             ///  because other transforms may work inefficient if block size is small.
@@ -313,13 +306,35 @@ BlockIO InterpreterInsertQuery::execute()
         }
     }
 
+    return {std::move(res), std::move(out_streams)};
+}
+
+BlockIO InterpreterInsertQuery::execute()
+{
+    const auto & settings = getContext()->getSettingsRef();
+    auto & query = query_ptr->as<ASTInsertQuery &>();
+
+    auto table = getTable(query);
+    auto table_lock = table->lockForShare(getContext()->getInitialQueryId(), settings.lock_acquire_timeout);
+    auto metadata_snapshot = table->getInMemoryMetadataPtr();
+    auto sample_block = getSampleBlock(query, table, metadata_snapshot);
+
+    if (!query.table_function)
+        getContext()->checkAccess(AccessType::INSERT, query.table_id, sample_block.getNames());
+
+    BlockIO res;
+    BlockOutputStreams out_streams;
+    std::tie(res, out_streams) = executeImpl(table, metadata_snapshot, sample_block);
+
     /// What type of query: INSERT or INSERT SELECT or INSERT WATCH?
-    if (is_distributed_insert_select)
+    if (out_streams.empty())
     {
         /// Pipeline was already built.
     }
     else if (query.select || query.watch)
     {
+        /// XXX: is this branch also triggered for select+input() case?
+
         const auto & header = out_streams.at(0)->getHeader();
         auto actions_dag = ActionsDAG::makeConvertingActions(
                 res.pipeline.getHeader().getColumnsWithTypeAndName(),
@@ -350,11 +365,15 @@ BlockIO InterpreterInsertQuery::execute()
                     throw Exception("Cannot insert column " + column.name + ", because it is MATERIALIZED column.", ErrorCodes::ILLEGAL_COLUMN);
         }
     }
-    else if (query.data && !query.has_tail) /// can execute without additional data
+    else if (query.hasInlinedData())
     {
-        // res.out = std::move(out_streams.at(0));
-        res.in = std::make_shared<InputStreamFromASTInsertQuery>(query_ptr, nullptr, query_sample_block, getContext(), nullptr);
-        res.in = std::make_shared<NullAndDoCopyBlockInputStream>(res.in, out_streams.at(0));
+        auto pipe = getSourceFromASTInsertQuery(query_ptr, true, sample_block, getContext(), nullptr);
+        res.pipeline.init(std::move(pipe));
+        res.pipeline.resize(1);
+        res.pipeline.setSinks([&](const Block &, Pipe::StreamType)
+        {
+            return std::make_shared<SinkToOutputStream>(out_streams.at(0));
+        });
     }
     else
         res.out = std::move(out_streams.at(0));
@@ -369,6 +388,28 @@ BlockIO InterpreterInsertQuery::execute()
     return res;
 }
 
+Processors InterpreterInsertQuery::getSinks()
+{
+    const auto & settings = getContext()->getSettingsRef();
+    auto & query = query_ptr->as<ASTInsertQuery &>();
+
+    auto table = getTable(query);
+    auto table_lock = table->lockForShare(getContext()->getInitialQueryId(), settings.lock_acquire_timeout);
+    auto metadata_snapshot = table->getInMemoryMetadataPtr();
+    auto sample_block = getSampleBlock(query, table, metadata_snapshot);
+
+    if (!query.table_function)
+        getContext()->checkAccess(AccessType::INSERT, query.table_id, sample_block.getNames());
+
+    auto out_streams = executeImpl(table, metadata_snapshot, sample_block).second;
+
+    Processors sinks;
+    sinks.reserve(out_streams.size());
+    for (const auto & out : out_streams)
+        sinks.emplace_back(std::make_shared<SinkToOutputStream>(out));
+
+    return sinks;
+}
 
 StorageID InterpreterInsertQuery::getDatabaseTable() const
 {

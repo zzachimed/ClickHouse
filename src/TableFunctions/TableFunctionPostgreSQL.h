@@ -5,7 +5,7 @@
 
 #if USE_LIBPQXX
 #include <TableFunctions/ITableFunction.h>
-#include <Storages/PostgreSQL/PoolWithFailover.h>
+#include <Core/PostgreSQL/PoolWithFailover.h>
 
 
 namespace DB
@@ -28,7 +28,7 @@ private:
     void parseArguments(const ASTPtr & ast_function, ContextPtr context) override;
 
     String connection_str;
-    String remote_table_name, remote_table_schema;
+    String remote_table_name, remote_table_schema, on_conflict;
     postgres::PoolWithFailoverPtr connection_pool;
 };
 

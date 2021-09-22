@@ -31,6 +31,7 @@ SRCS(
     AggregateFunctionGroupUniqArray.cpp
     AggregateFunctionHistogram.cpp
     AggregateFunctionIf.cpp
+    AggregateFunctionIntervalLengthSum.cpp
     AggregateFunctionMLMethod.cpp
     AggregateFunctionMannWhitney.cpp
     AggregateFunctionMax.cpp
@@ -43,11 +44,12 @@ SRCS(
     AggregateFunctionRankCorrelation.cpp
     AggregateFunctionResample.cpp
     AggregateFunctionRetention.cpp
-    AggregateFunctionSegmentLengthSum.cpp
     AggregateFunctionSequenceMatch.cpp
     AggregateFunctionSequenceNextNode.cpp
     AggregateFunctionSimpleLinearRegression.cpp
     AggregateFunctionSimpleState.cpp
+    AggregateFunctionSingleValueOrNull.cpp
+    AggregateFunctionSparkbar.cpp
     AggregateFunctionState.cpp
     AggregateFunctionStatistics.cpp
     AggregateFunctionStatisticsSimple.cpp
@@ -61,6 +63,7 @@ SRCS(
     AggregateFunctionUniqUpTo.cpp
     AggregateFunctionWelchTTest.cpp
     AggregateFunctionWindowFunnel.cpp
+    IAggregateFunction.cpp
     UniqCombinedBiasData.cpp
     UniqVariadicHash.cpp
     parseAggregateFunctionParameters.cpp

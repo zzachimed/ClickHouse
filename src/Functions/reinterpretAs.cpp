@@ -47,13 +47,15 @@ class FunctionReinterpret : public IFunction
 public:
     static constexpr auto name = "reinterpret";
 
-    static FunctionPtr create(ContextConstPtr) { return std::make_shared<FunctionReinterpret>(); }
+    static FunctionPtr create(ContextPtr) { return std::make_shared<FunctionReinterpret>(); }
 
     String getName() const override { return name; }
 
     size_t getNumberOfArguments() const override { return 2; }
 
     bool useDefaultImplementationForConstants() const override { return true; }
+
+    bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo & /*arguments*/) const override { return false; }
 
     ColumnNumbers getArgumentsThatAreAlwaysConstant() const override { return {1}; }
 
@@ -215,7 +217,7 @@ public:
                     using From = typename FromType::FieldType;
                     using To = typename ToType::FieldType;
 
-                    using FromColumnType = std::conditional_t<IsDecimalNumber<From>, ColumnDecimal<From>, ColumnVector<From>>;
+                    using FromColumnType = ColumnVectorOrDecimal<From>;
 
                     const auto * column_from = assert_cast<const FromColumnType*>(arguments[0].column.get());
 
@@ -259,7 +261,9 @@ private:
     {
         return type.isUInt() ||
             type.isInt() ||
-            type.isDateOrDateTime() ||
+            type.isDate() ||
+            type.isDateTime() ||
+            type.isDateTime64() ||
             type.isFloat() ||
             type.isUUID() ||
             type.isDecimal();
@@ -349,13 +353,15 @@ class FunctionReinterpretAs : public IFunction
 {
 public:
     static constexpr auto name = Name::name;
-    static FunctionPtr create(ContextConstPtr) { return std::make_shared<FunctionReinterpretAs>(); }
+    static FunctionPtr create(ContextPtr) { return std::make_shared<FunctionReinterpretAs>(); }
 
     String getName() const override { return name; }
 
     size_t getNumberOfArguments() const override { return 1; }
 
     bool useDefaultImplementationForConstants() const override { return true; }
+
+    bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo & /*arguments*/) const override { return false; }
 
     static ColumnsWithTypeAndName addTypeColumnToArguments(const ColumnsWithTypeAndName & arguments)
     {

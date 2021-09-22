@@ -1,6 +1,8 @@
 #pragma once
 
+#if !defined(ARCADIA_BUILD)
 #include <Common/config.h>
+#endif
 
 #if USE_AWS_S3
 
@@ -72,6 +74,8 @@ struct URI
     bool is_virtual_hosted_style;
 
     explicit URI(const Poco::URI & uri_);
+
+    static void validateBucket(const String & bucket, const Poco::URI & uri);
 };
 
 }

@@ -1,8 +1,11 @@
 #pragma once
 
+#include <common/bit_cast.h>
+#include <Common/HashTable/Hash.h>
 #include <Columns/IColumn.h>
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnConst.h>
+#include <Columns/ColumnMap.h>
 #include <Columns/ColumnNullable.h>
 #include <Columns/ColumnsNumber.h>
 #include <Columns/ColumnString.h>
@@ -13,8 +16,6 @@
 #include <DataTypes/DataTypeFixedString.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypesNumber.h>
-#include <ext/bit_cast.h>
-#include <Common/HashTable/Hash.h>
 #include <Interpreters/BloomFilter.h>
 
 namespace DB
@@ -90,6 +91,7 @@ struct BloomFilterHash
         else if (which.isEnum8()) return build_hash_column(getNumberTypeHash<Int64, Int8>(field));
         else if (which.isEnum16()) return build_hash_column(getNumberTypeHash<Int64, Int16>(field));
         else if (which.isDate()) return build_hash_column(getNumberTypeHash<UInt64, UInt16>(field));
+        else if (which.isDate32()) return build_hash_column(getNumberTypeHash<UInt64, Int32>(field));
         else if (which.isDateTime()) return build_hash_column(getNumberTypeHash<UInt64, UInt32>(field));
         else if (which.isFloat32()) return build_hash_column(getNumberTypeHash<Float64, Float64>(field));
         else if (which.isFloat64()) return build_hash_column(getNumberTypeHash<Float64, Float64>(field));
@@ -111,6 +113,26 @@ struct BloomFilterHash
 
             const auto & offsets = array_col->getOffsets();
             limit = offsets[pos + limit - 1] - offsets[pos - 1];    /// PaddedPODArray allows access on index -1.
+            pos = offsets[pos - 1];
+
+            if (limit == 0)
+            {
+                auto index_column = ColumnUInt64::create(1);
+                ColumnUInt64::Container & index_column_vec = index_column->getData();
+                index_column_vec[0] = 0;
+                return index_column;
+            }
+        }
+
+        if (which.isMap())
+        {
+            const auto * map_col = typeid_cast<const ColumnMap *>(column.get());
+            const auto & keys_data = map_col->getNestedData().getColumn(0);
+            if (checkAndGetColumn<ColumnNullable>(keys_data))
+                throw Exception("Unexpected key type " + data_type->getName() + " of bloom filter index.", ErrorCodes::BAD_ARGUMENTS);
+
+            const auto & offsets = map_col->getNestedColumn().getOffsets();
+            limit = offsets[pos + limit - 1] - offsets[pos - 1];  /// PaddedPODArray allows access on index -1.
             pos = offsets[pos - 1];
 
             if (limit == 0)
@@ -151,6 +173,7 @@ struct BloomFilterHash
         else if (which.isEnum8()) getNumberTypeHash<Int8, is_first>(column, vec, pos);
         else if (which.isEnum16()) getNumberTypeHash<Int16, is_first>(column, vec, pos);
         else if (which.isDate()) getNumberTypeHash<UInt16, is_first>(column, vec, pos);
+        else if (which.isDate32()) getNumberTypeHash<Int32, is_first>(column, vec, pos);
         else if (which.isDateTime()) getNumberTypeHash<UInt32, is_first>(column, vec, pos);
         else if (which.isFloat32()) getNumberTypeHash<Float32, is_first>(column, vec, pos);
         else if (which.isFloat64()) getNumberTypeHash<Float64, is_first>(column, vec, pos);

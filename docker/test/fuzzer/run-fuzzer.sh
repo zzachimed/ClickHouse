@@ -1,5 +1,5 @@
 #!/bin/bash
-# shellcheck disable=SC2086
+# shellcheck disable=SC2086,SC2001
 
 set -eux
 set -o pipefail
@@ -12,7 +12,7 @@ stage=${stage:-}
 script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 echo "$script_dir"
 repo_dir=ch
-BINARY_TO_DOWNLOAD=${BINARY_TO_DOWNLOAD:="clang-11_debug_none_bundled_unsplitted_disable_False_binary"}
+BINARY_TO_DOWNLOAD=${BINARY_TO_DOWNLOAD:="clang-13_debug_none_bundled_unsplitted_disable_False_binary"}
 
 function clone
 {
@@ -71,12 +71,15 @@ function watchdog
     kill -9 -- $fuzzer_pid ||:
 }
 
-function filter_exists
+function filter_exists_and_template
 {
     local path
     for path in "$@"; do
         if [ -e "$path" ]; then
-            echo "$path"
+            # SC2001 shellcheck suggests:
+            # echo ${path//.sql.j2/.gen.sql}
+            # but it doesn't allow to use regex
+            echo "$path" | sed 's/\.sql\.j2$/.gen.sql/'
         else
             echo "'$path' does not exists" >&2
         fi
@@ -85,11 +88,13 @@ function filter_exists
 
 function fuzz
 {
+    /generate-test-j2.py --path ch/tests/queries/0_stateless
+
     # Obtain the list of newly added tests. They will be fuzzed in more extreme way than other tests.
     # Don't overwrite the NEW_TESTS_OPT so that it can be set from the environment.
-    NEW_TESTS="$(sed -n 's!\(^tests/queries/0_stateless/.*\.sql\)$!ch/\1!p' ci-changed-files.txt | sort -R)"
+    NEW_TESTS="$(sed -n 's!\(^tests/queries/0_stateless/.*\.sql\(\.j2\)\?\)$!ch/\1!p' ci-changed-files.txt | sort -R)"
     # ci-changed-files.txt contains also files that has been deleted/renamed, filter them out.
-    NEW_TESTS="$(filter_exists $NEW_TESTS)"
+    NEW_TESTS="$(filter_exists_and_template $NEW_TESTS)"
     if [[ -n "$NEW_TESTS" ]]
     then
         NEW_TESTS_OPT="${NEW_TESTS_OPT:---interleave-queries-file ${NEW_TESTS}}"
@@ -97,16 +102,13 @@ function fuzz
         NEW_TESTS_OPT="${NEW_TESTS_OPT:-}"
     fi
 
+    export CLICKHOUSE_WATCHDOG_ENABLE=0 # interferes with gdb
     clickhouse-server --config-file db/config.xml -- --path db 2>&1 | tail -100000 > server.log &
-
     server_pid=$!
     kill -0 $server_pid
-    while ! clickhouse-client --query "select 1" && kill -0 $server_pid ; do echo . ; sleep 1 ; done
-    clickhouse-client --query "select 1"
-    kill -0 $server_pid
-    echo Server started
 
     echo "
+set follow-fork-mode child
 handle all noprint
 handle SIGSEGV stop print
 handle SIGBUS stop print
@@ -115,12 +117,31 @@ thread apply all backtrace
 continue
 " > script.gdb
 
-    gdb -batch -command script.gdb -p "$(pidof clickhouse-server)" &
+    gdb -batch -command script.gdb -p $server_pid &
+
+    # Check connectivity after we attach gdb, because it might cause the server
+    # to freeze and the fuzzer will fail.
+    for _ in {1..60}
+    do
+        sleep 1
+        if clickhouse-client --query "select 1"
+        then
+            break
+        fi
+    done
+    clickhouse-client --query "select 1" # This checks that the server is responding
+    kill -0 $server_pid # This checks that it is our server that is started and not some other one
+    echo Server started and responded
 
     # SC2012: Use find instead of ls to better handle non-alphanumeric filenames. They are all alphanumeric.
     # SC2046: Quote this to prevent word splitting. Actually I need word splitting.
     # shellcheck disable=SC2012,SC2046
-    clickhouse-client --query-fuzzer-runs=1000 --queries-file $(ls -1 ch/tests/queries/0_stateless/*.sql | sort -R) $NEW_TESTS_OPT \
+    clickhouse-client \
+        --receive_timeout=10 \
+        --receive_data_timeout_ms=10000 \
+        --query-fuzzer-runs=1000 \
+        --queries-file $(ls -1 ch/tests/queries/0_stateless/*.sql | sort -R) \
+        $NEW_TESTS_OPT \
         > >(tail -n 100000 > fuzzer.log) \
         2>&1 &
     fuzzer_pid=$!
@@ -178,6 +199,10 @@ continue
     jobs
     pstree -aspgT
 
+    server_exit_code=0
+    wait $server_pid || server_exit_code=$?
+    echo "Server exit code is $server_exit_code"
+
     # Make files with status and description we'll show for this check on Github.
     task_exit_code=$fuzzer_exit_code
     if [ "$server_died" == 1 ]
@@ -185,7 +210,7 @@ continue
         # The server has died.
         task_exit_code=210
         echo "failure" > status.txt
-        if ! grep -ao "Received signal.*\|Logical error.*\|Assertion.*failed\|Failed assertion.*\|.*runtime error: .*\|.*is located.*\|SUMMARY: AddressSanitizer:.*\|SUMMARY: MemorySanitizer:.*\|SUMMARY: ThreadSanitizer:.*\|.*_LIBCPP_ASSERT.*" server.log > description.txt
+        if ! grep --text -ao "Received signal.*\|Logical error.*\|Assertion.*failed\|Failed assertion.*\|.*runtime error: .*\|.*is located.*\|SUMMARY: AddressSanitizer:.*\|SUMMARY: MemorySanitizer:.*\|SUMMARY: ThreadSanitizer:.*\|.*_LIBCPP_ASSERT.*" server.log > description.txt
         then
             echo "Lost connection to server. See the logs." > description.txt
         fi
@@ -198,13 +223,17 @@ continue
         echo "success" > status.txt
         echo "OK" > description.txt
     else
-        # The server was alive, but the fuzzer returned some error. Probably this
-        # is a problem in the fuzzer itself. Don't grep the server log in this
-        # case, because we will find a message about normal server termination
-        # (Received signal 15), which is confusing.
+        # The server was alive, but the fuzzer returned some error. This might
+        # be some client-side error detected by fuzzing, or a problem in the
+        # fuzzer itself. Don't grep the server log in this case, because we will
+        # find a message about normal server termination (Received signal 15),
+        # which is confusing.
         task_exit_code=$fuzzer_exit_code
         echo "failure" > status.txt
-        echo "Fuzzer failed ($fuzzer_exit_code). See the logs." > description.txt
+        { grep --text -o "Found error:.*" fuzzer.log \
+            || grep --text -ao "Exception:.*" fuzzer.log \
+            || echo "Fuzzer failed ($fuzzer_exit_code). See the logs." ; } \
+            | tail -1 > description.txt
     fi
 }
 
