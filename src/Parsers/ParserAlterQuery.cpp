@@ -127,7 +127,7 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
 
     switch (alter_object)
     {
-        case ASTAlterQuery::AlterObjectType::LIVE_VIEW: //FIXME
+        case ASTAlterQuery::AlterObjectType::LIVE_VIEW:
         {
             if (s_refresh.ignore(pos, expected))
             {
@@ -753,6 +753,10 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
                 if (!select_p.parse(pos, command->select, expected))
                     return false;
                 command->type = ASTAlterCommand::MODIFY_QUERY;
+            }
+            else if (s_refresh.ignore(pos, expected))
+            {
+                command->type = ASTAlterCommand::VIEW_REFRESH;
             }
             else
                 return false;

@@ -269,7 +269,7 @@ void StorageMaterializedView::truncate(const ASTPtr &, const StorageMetadataPtr 
 
 void StorageMaterializedView::refresh(bool grab_lock)
 {
-    LOG_DEBUG(log, "Refresh materialized view.");
+    LOG_TRACE(log, "Refreshing materialized view.");
     std::unique_lock lock(mutex, std::defer_lock);
     if (grab_lock)
     {
