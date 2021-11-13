@@ -62,6 +62,7 @@ def parse_env_variables(build_type, compiler, sanitizer, package_type, image_typ
     ARM_SUFFIX = "-aarch64"
     FREEBSD_SUFFIX = "-freebsd"
     PPC_SUFFIX = '-ppc64le'
+    RISCV_SUFFIX = '-riscv64'
 
     result = []
     cmake_flags = ['$CMAKE_FLAGS', '-DADD_GDB_INDEX_FOR_GOLD=1']
@@ -71,8 +72,9 @@ def parse_env_variables(build_type, compiler, sanitizer, package_type, image_typ
     is_cross_darwin_arm = compiler.endswith(DARWIN_ARM_SUFFIX)
     is_cross_arm = compiler.endswith(ARM_SUFFIX)
     is_cross_ppc = compiler.endswith(PPC_SUFFIX)
+    is_cross_riscv = compiler.endswith(RISCV_SUFFIX)
     is_cross_freebsd = compiler.endswith(FREEBSD_SUFFIX)
-    is_cross_compile = is_cross_darwin or is_cross_darwin_arm or is_cross_arm or is_cross_freebsd or is_cross_ppc
+    is_cross_compile = is_cross_darwin or is_cross_darwin_arm or is_cross_arm or is_cross_freebsd or is_cross_ppc or is_cross_riscv
 
     # Explicitly use LLD with Clang by default.
     # Don't force linker for cross-compilation.
@@ -102,6 +104,9 @@ def parse_env_variables(build_type, compiler, sanitizer, package_type, image_typ
     elif is_cross_ppc:
         cc = compiler[:-len(PPC_SUFFIX)]
         cmake_flags.append("-DCMAKE_TOOLCHAIN_FILE=/build/cmake/linux/toolchain-ppc64le.cmake")
+    elif is_cross_riscv:
+        cc = compiler[:-len(RISCV_SUFFIX)]
+        cmake_flags.append("-DCMAKE_TOOLCHAIN_FILE=/build/cmake/linux/toolchain-riscv64.cmake")
     else:
         cc = compiler
 
@@ -210,7 +215,8 @@ if __name__ == "__main__":
     parser.add_argument("--build-type", choices=("debug", ""), default="")
     parser.add_argument("--compiler", choices=("clang-11", "clang-11-darwin", "clang-11-darwin-aarch64", "clang-11-aarch64",
                                                "clang-12", "clang-12-darwin", "clang-12-darwin-aarch64", "clang-12-aarch64",
-                                               "clang-13", "clang-13-darwin", "clang-13-darwin-aarch64", "clang-13-aarch64", "clang-13-ppc64le",
+                                               "clang-13", "clang-13-darwin", "clang-13-darwin-aarch64", "clang-13-aarch64",
+                                               "clang-13-ppc64le", "clang-13-riscv64",
                                                "clang-11-freebsd", "clang-12-freebsd", "clang-13-freebsd", "gcc-11"), default="clang-13")
     parser.add_argument("--sanitizer", choices=("address", "thread", "memory", "undefined", ""), default="")
     parser.add_argument("--unbundled", action="store_true")
