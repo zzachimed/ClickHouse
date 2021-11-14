@@ -56,6 +56,7 @@ RUN apt-get update \
         pigz \
         rename \
         tzdata \
+        binutils-riscv64-linux-gnu \
         --yes --no-install-recommends
 
 # This symlink required by gcc to find lld compiler

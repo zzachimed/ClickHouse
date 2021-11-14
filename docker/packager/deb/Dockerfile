@@ -55,6 +55,7 @@ RUN apt-get update \
         pixz \
         pkg-config \
         tzdata \
+        binutils-riscv64-linux-gnu \
         --yes --no-install-recommends
 
 # NOTE: Seems like gcc-11 is too new for ubuntu20 repository
