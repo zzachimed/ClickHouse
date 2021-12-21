@@ -137,8 +137,6 @@ private:
     /// It is needed for debug. See QueryPipelineProcessorsCollector.
     Processors * collected_processors = nullptr;
 
-    Poco::Logger * log = &Poco::Logger::get("Pipe");
-
     /// This methods are for QueryPipeline. It is allowed to complete graph only there.
     /// So, we may be sure that Pipe always has output port if not empty.
     bool isCompleted() const { return !empty() && output_ports.empty(); }

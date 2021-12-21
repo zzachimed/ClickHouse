@@ -27,8 +27,6 @@ private:
 
     UInt64 keys_vector_idx = 0;
 
-    Poco::Logger * log = &Poco::Logger::get("GroupingSetsTransform");
-
     Chunk merge(Chunks && chunks, bool final);
 };
 

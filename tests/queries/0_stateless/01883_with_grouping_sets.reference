@@ -73,6 +73,19 @@
 2	10	5400
 
 0	0	49500
+SELECT
+    fact_1_id,
+    fact_3_id,
+    sum(sales_value) AS sales_value
+FROM grouping_sets
+GROUP BY
+    GROUPING SETS (
+        (fact_1_id),
+        (fact_1_id, fact_3_id))
+    WITH TOTALS
+ORDER BY
+    fact_1_id ASC,
+    fact_3_id ASC
 1	0	24500
 1	1	4500
 1	3	4700
