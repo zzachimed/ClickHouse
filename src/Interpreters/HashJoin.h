@@ -254,7 +254,7 @@ public:
         using MappedType = Mapped;
         std::unique_ptr<FixedHashMap<UInt8, Mapped>>                  key8;
         std::unique_ptr<FixedHashMap<UInt16, Mapped>>                 key16;
-        std::unique_ptr<HashMap<UInt32, Mapped, HashCRC32<UInt32>>>   key32;
+        std::unique_ptr<HashMapBlockFilter<UInt32, Mapped, HashCRC32<UInt32>>>   key32;
         std::unique_ptr<HashMap<UInt64, Mapped, HashCRC32<UInt64>>>   key64;
         std::unique_ptr<HashMapWithSavedHash<StringRef, Mapped>>      key_string;
         std::unique_ptr<HashMapWithSavedHash<StringRef, Mapped>>      key_fixed_string;

@@ -433,14 +433,16 @@ struct AllocatorBufferDeleter<true, Allocator, Cell>
     size_t size;
 };
 
-
+class EmptyFilter{};
 // The HashTable
-template <typename Key, typename Cell, typename Hash, typename Grower, typename Allocator>
+template <typename Key, typename Cell, typename Hash, typename Grower, typename Allocator, typename Filter=EmptyFilter
+>
 class HashTable : private boost::noncopyable,
                   protected Hash,
                   protected Allocator,
                   protected Cell::State,
-                  public ZeroValueStorage<Cell::need_zero_value_storage, Cell> /// empty base optimization
+                  public ZeroValueStorage<Cell::need_zero_value_storage, Cell>, /// empty base optimization
+                  protected Filter   
 {
 public:
     // If we use an allocator with inline memory, check that the initial
@@ -1038,6 +1040,13 @@ public:
         if (!emplaceIfZero(Cell::getKey(x), res.first, res.second, hash_value))
         {
             emplaceNonZero(Cell::getKey(x), res.first, res.second, hash_value);
+	    if constexpr (!std::is_same_v<Filter, EmptyFilter>)
+            {
+                if(res.second)
+                 {
+                   Filter::addByHash(hash_value);
+                 }
+            }
         }
 
         if (res.second)
@@ -1092,8 +1101,14 @@ public:
                                   bool & inserted, size_t hash_value)
     {
         const auto & key = keyHolderGetKey(key_holder);
-        if (!emplaceIfZero(key, it, inserted, hash_value))
+        if (!emplaceIfZero(key, it, inserted, hash_value)){
             emplaceNonZero(key_holder, it, inserted, hash_value);
+	    if constexpr (!std::is_same_v<Filter, EmptyFilter>)
+            {
+                if(inserted)
+                  Filter::addByHash(hash_value);
+            }
+	}
     }
 
     /// Copy the cell from another hash table. It is assumed that the cell is not zero, and also that there was no such key in the table yet.
@@ -1106,14 +1121,23 @@ public:
 
         if (unlikely(grower.overflow(m_size)))
             resize();
+	if constexpr (!std::is_same_v<Filter, EmptyFilter>)
+        {
+          Filter::addByHash(hash_value);
+        }
     }
 
     LookupResult ALWAYS_INLINE find(const Key & x)
     {
         if (Cell::isZero(x, *this))
             return this->hasZero() ? this->zeroValue() : nullptr;
-
+	
         size_t hash_value = hash(x);
+	if constexpr(!std::is_same_v<Filter, EmptyFilter>)
+        {
+          if(!Filter::findByHash(hash_value))
+            return nullptr;
+        }
         size_t place_value = findCell(x, hash_value, grower.place(hash_value));
         return !buf[place_value].isZero(*this) ? &buf[place_value] : nullptr;
     }
@@ -1257,8 +1281,13 @@ public:
     {
         if (Cell::isZero(x, *this))
             return this->hasZero();
-
+	
         size_t hash_value = hash(x);
+	if constexpr(!std::is_same_v<Filter, EmptyFilter>)
+        {
+          if(!Filter::findByHash(hash_value))
+            return false;
+        }
         size_t place_value = findCell(x, hash_value, grower.place(hash_value));
         return !buf[place_value].isZero(*this);
     }
@@ -1268,7 +1297,11 @@ public:
     {
         if (Cell::isZero(x, *this))
             return this->hasZero();
-
+        if constexpr(!std::is_same_v<Filter, EmptyFilter>)
+        {
+          if(!Filter::findByHash(hash_value))
+            return false;
+        }
         size_t place_value = findCell(x, hash_value, grower.place(hash_value));
         return !buf[place_value].isZero(*this);
     }
@@ -1419,3 +1452,63 @@ public:
     }
 #endif
 };
+
+template<typename Hash,typename Allocator>
+class BlockedBloomFilter
+{
+private:
+  __m256i buckets[131072]{};
+  Hash hasher{};
+  inline static __m256i ones=_mm256_set1_epi32(1);
+  inline static __m256i rehash_val=  _mm256_setr_epi32(0x47b6137bU, 0x44974d91U, 0x8824ad5bU,
+      0xa2b7289dU, 0x705495c7U, 0x2df1424bU, 0x9efc4947U, 0x5c6bfb31U);
+  static __m256i ALWAYS_INLINE createMask(const uint64_t hash) noexcept
+  {
+
+    __m256i hash_data = _mm256_set1_epi64x(hash);
+    hash_data = _mm256_mullo_epi32(rehash_val, hash_data);
+    hash_data = _mm256_srli_epi32(hash_data, 27);
+    return _mm256_sllv_epi32(ones, hash_data);
+  }
+
+public:
+  BlockedBloomFilter()=default;
+
+  size_t bucketSize()const {
+    return 131072*sizeof(__m256i);
+  }
+  BlockedBloomFilter(const BlockedBloomFilter&)=delete;
+  BlockedBloomFilter & operator=(const BlockedBloomFilter&)=delete;
+  void ALWAYS_INLINE add(uint64_t  key) noexcept
+  {
+    const auto hash = hasher(key);
+
+    const uint32_t bucket_idx=hash & 131071;
+    const __m256i mask = createMask(hash);
+
+    _mm256_store_si256(&(buckets)[bucket_idx], _mm256_or_si256(buckets[bucket_idx], mask));
+  }
+  void ALWAYS_INLINE addByHash(uint64_t hash) noexcept
+  {
+
+    const uint32_t bucket_idx=hash & 131071;
+    const __m256i mask = createMask(hash);
+
+    _mm256_store_si256(&(buckets)[bucket_idx], _mm256_or_si256(buckets[bucket_idx], mask));
+  }
+  bool ALWAYS_INLINE findBykey(uint64_t key) const noexcept
+  {
+    const auto hash = hasher(key);
+    const uint32_t bucket_idx=hash & 131071;
+    const __m256i mask = createMask(hash);
+    return _mm256_testc_si256(buckets[bucket_idx], mask);
+  }
+  bool ALWAYS_INLINE findByHash(uint64_t hash) const noexcept
+  {
+    const uint32_t bucket_idx=hash & 131071;
+    const __m256i mask = createMask(hash);
+    return _mm256_testc_si256(buckets[bucket_idx], mask);
+  }
+
+};
+

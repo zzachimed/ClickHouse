@@ -185,12 +185,14 @@ template <
     typename Cell,
     typename Hash = DefaultHash<Key>,
     typename Grower = HashTableGrowerWithPrecalculation<>,
-    typename Allocator = HashTableAllocator>
-class HashMapTable : public HashTable<Key, Cell, Hash, Grower, Allocator>
+    typename Allocator = HashTableAllocator,
+    typename Filter=EmptyFilter
+  >
+class HashMapTable : public HashTable<Key, Cell, Hash, Grower, Allocator,Filter>
 {
 public:
     using Self = HashMapTable;
-    using Base = HashTable<Key, Cell, Hash, Grower, Allocator>;
+  using Base = HashTable<Key, Cell, Hash, Grower, Allocator,Filter>;
     using LookupResult = typename Base::LookupResult;
     using Iterator = typename Base::iterator;
 
@@ -357,3 +359,12 @@ using HashMapWithStackMemory = HashMapTable<
     HashTableAllocatorWithStackMemory<
         (1ULL << initial_size_degree)
         * sizeof(HashMapCellWithSavedHash<Key, Mapped, Hash>)>>;
+
+template <
+  typename Key,
+  typename Mapped,
+  typename Hash = DefaultHash<Key>,
+  typename Grower = HashTableGrower<>,
+  typename Allocator = HashTableAllocator
+  >
+using HashMapBlockFilter = HashMapTable<Key, HashMapCell<Key, Mapped, Hash>, Hash, Grower, Allocator,BlockedBloomFilter<Hash,Allocator>>;
