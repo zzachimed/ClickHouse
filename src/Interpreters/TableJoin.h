@@ -28,6 +28,7 @@ class ASTSelectQuery;
 struct DatabaseAndTableWithAlias;
 class Block;
 class DictionaryJoinAdapter;
+class ExpressionActions;
 class StorageJoin;
 class StorageDictionary;
 class IKeyValueEntity;
@@ -140,7 +141,7 @@ private:
     const size_t default_max_bytes = 0;
     const bool join_use_nulls = false;
     const size_t max_joined_block_rows = 0;
-    MultiEnum<JoinAlgorithm> join_algorithm = MultiEnum<JoinAlgorithm>(JoinAlgorithm::AUTO);
+    std::vector<JoinAlgorithm> join_algorithm;
     const size_t partial_merge_join_rows_in_right_blocks = 0;
     const size_t partial_merge_join_left_table_buffer_bytes = 0;
     const size_t max_files_to_merge = 0;
@@ -153,6 +154,8 @@ private:
     ASTs key_asts_right;
 
     Clauses clauses;
+    /// Originally used for inequal join. If there is no any inequal join condition, it will be nullptr.
+    std::shared_ptr<ExpressionActions> mixed_join_expression = nullptr;
 
     ASTTableJoin table_join;
 
@@ -218,7 +221,7 @@ private:
 
     /// Calculates common supertypes for corresponding join key columns.
     template <typename LeftNamesAndTypes, typename RightNamesAndTypes>
-    void inferJoinKeyCommonType(const LeftNamesAndTypes & left, const RightNamesAndTypes & right, bool allow_right, bool strict);
+    void inferJoinKeyCommonType(const LeftNamesAndTypes & left, const RightNamesAndTypes & right, bool allow_right, bool require_strict_keys_match);
 
     void deduplicateAndQualifyColumnNames(const NameSet & left_table_columns, const String & right_table_prefix);
 
@@ -236,14 +239,17 @@ public:
         : size_limits(limits)
         , default_max_bytes(0)
         , join_use_nulls(use_nulls)
-        , join_algorithm(JoinAlgorithm::DEFAULT)
+        , join_algorithm({JoinAlgorithm::DEFAULT})
     {
         clauses.emplace_back().key_names_right = key_names_right;
         table_join.kind = kind;
         table_join.strictness = strictness;
     }
 
+    TableJoin(const TableJoin & rhs) = default;
+
     JoinKind kind() const { return table_join.kind; }
+    void setKind(JoinKind kind) { table_join.kind = kind; }
     JoinStrictness strictness() const { return table_join.strictness; }
     bool sameStrictnessAndKind(JoinStrictness, JoinKind) const;
     const SizeLimits & sizeLimits() const { return size_limits; }
@@ -253,16 +259,16 @@ public:
 
     ActionsDAGPtr createJoinedBlockActions(ContextPtr context) const;
 
+    const std::vector<JoinAlgorithm> & getEnabledJoinAlgorithms() const { return join_algorithm; }
+
     bool isEnabledAlgorithm(JoinAlgorithm val) const
     {
         /// When join_algorithm = 'default' (not specified by user) we use hash or direct algorithm.
         /// It's behaviour that was initially supported by clickhouse.
-        bool is_enabled_by_default = val == JoinAlgorithm::DEFAULT
-                                  || val == JoinAlgorithm::HASH
-                                  || val == JoinAlgorithm::DIRECT;
-        if (join_algorithm.isSet(JoinAlgorithm::DEFAULT) && is_enabled_by_default)
+        bool is_default_enabled = std::find(join_algorithm.begin(), join_algorithm.end(), JoinAlgorithm::DEFAULT) != join_algorithm.end();
+        if (is_default_enabled && (val == JoinAlgorithm::DEFAULT || val == JoinAlgorithm::HASH || val == JoinAlgorithm::DIRECT))
             return true;
-        return join_algorithm.isSet(val);
+        return std::find(join_algorithm.begin(), join_algorithm.end(), val) != join_algorithm.end();
     }
 
     bool allowParallelHashJoin() const;
@@ -297,6 +303,9 @@ public:
 
     std::vector<JoinOnClause> & getClauses() { return clauses; }
     const std::vector<JoinOnClause> & getClauses() const { return clauses; }
+
+    const std::shared_ptr<ExpressionActions> & getMixedJoinExpression() const { return mixed_join_expression; }
+    std::shared_ptr<ExpressionActions> & getMixedJoinExpression() { return mixed_join_expression; }
 
     Names getAllNames(JoinTableSide side) const;
 
